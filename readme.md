@@ -67,4 +67,4 @@ Your API server should be HTTPS to ensure the security of the data. You can use 
 
 ### License
 
-[MIT License](https://github.com/devngho/tpuswarm/blob/main/LICENSE) 💕
+[MIT License](https://github.com/devngho/tpuswarm/blob/master/LICENSE) 💕
