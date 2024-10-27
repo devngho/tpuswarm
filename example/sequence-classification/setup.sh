@@ -1,6 +1,6 @@
 curl --output ssl.crt.pem "Your gist url"
 curl --output ssl.key.pem "Your gist url"
-curl --output embeddings.py "Your gist url"
+curl --output server.py "Your gist url"
 
 mkdir -p ~/miniconda3
 wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
@@ -24,5 +24,5 @@ pip install git+https://github.com/devngho/transformers@3815933c98a48a25c81fd488
 
 export HF_TOKEN="Your HF token"
 
-python embeddings.py
+python server.py
 

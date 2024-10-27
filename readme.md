@@ -20,9 +20,9 @@ python tpuswarm.py --region=us-central2-b --project=your-project --tpu-device=v4
 python tpuswarm_clean.py --region=us-central2-b --project=your-project
 ```
 
-### Batch shape
+### Guide
 
-Your program should host a HTTP API at 8080, and accept POST requests with a JSON body of the following shape:
+Your program should host a HTTPS API at 8080, and accept POST requests with a JSON body of the following shape:
 
 ```json
 POST /batch
@@ -62,3 +62,9 @@ And return a JSON response of the following shape:
 
 You can send a same shape of request to the `/batch` endpoint at the tpuswarm endpoint, and it will distribute the requests to the TPUs and return the results.
 tpuswarm will split the requests into `batch` size, and send them to the TPUs in parallel.
+
+Your API server should be HTTPS to ensure the security of the data. You can use a self-signed certificate for this purpose(it skips the certificate verification).
+
+### License
+
+[MIT License](https://github.com/devngho/tpuswarm/blob/main/LICENSE) 💕
