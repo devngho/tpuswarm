@@ -1,4 +1,5 @@
 import os
+import random
 import ssl
 
 from flask import Flask, request
@@ -18,6 +19,7 @@ setup_ips = []
 options = {
     'batch_size': 512,
 }
+aiohttp_errors = (aiohttp.client_exceptions.ClientResponseError, aiohttp.client_exceptions.ClientConnectorDNSError, aiohttp.client_exceptions.ClientConnectorError)
 
 async def send_request_to_ip(session, ip, data):
     try:
@@ -55,7 +57,7 @@ async def batch():
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # error -> try other nodes
-        retry_targets = [i for i, result in enumerate(results) if isinstance(result, Exception)]
+        retry_targets = [i for i, result in enumerate(results) if isinstance(result, Exception) or any(map(lambda x: x in result, aiohttp_errors))]
         if len(retry_targets) == 0: # all success
             # flatten the results
             return {'results': list(chain([result for r in results for result in r['result']]))}
@@ -63,10 +65,16 @@ async def batch():
         # retry
         for i in retry_targets:
             for ip in available_ips:
+                print(f"Retrying batch {i} on {ip}")
                 try:
-                    results[i] = await send_request_to_ip(session, ip, batches[i])
+                    results[i] = await send_request_to_ip(session, ip[1], {
+                        'prompts': batches[i],
+                        'samplings': body['samplings']
+                    })
                     break
                 except Exception as e:
+                    pass
+                except aiohttp_errors as e:
                     pass
 
     return {'results': list(chain([result for r in results for result in r['result']]))}
@@ -158,17 +166,19 @@ async def manage_tpus(project, region, tpu_device, node_count, command):
             print(f"Available TPU nodes: {len(available_ips)}")
 
             if len(active_nodes) + len(waiting_nodes) + len(provisioning_nodes) + len(suspending_nodes) + len(suspended_nodes) < node_count: # suspend nodes are included in quota!
-                print(f"Creating TPU node {len(tpuswarm_nodes) + 1}")
+                node_id_num = random.randint(1, 100000)
+                print(f"Creating TPU node {node_id_num}")
                 try:
-                    await create_tpu(str(len(tpuswarm_nodes) + 1), project, region, tpu_device)
+                    await create_tpu(str(node_id_num), project, region, tpu_device)
                 except Exception as e:
                     print(f"Failed to create TPU node: {e}. Continuing.")
 
             # then kill the suspended nodes
             for node in suspended_nodes:
-                print(f"Removing suspended node {node.queued_resources.name}")
-                setup_ips.remove(node.queued_resources.tpu.node_spec[0].node.network_endpoints[0].access_config.external_ip)
-                await remove_tpu(node.queued_resources)
+                node_name = node.tpu.node_spec[0].node_id
+                print(f"Removing suspended node {node_name}")
+                setup_ips = [ip for ip in setup_ips if ip[0] != node_name]
+                await remove_tpu(node)
             await asyncio.sleep(30)
             # await create_tpu("1", project, region, tpu_device)
 
