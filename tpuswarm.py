@@ -15,9 +15,11 @@ from _tpuswarm import manage_tpus, sslcontext, options, run_flask_app
 @click.option('--command', prompt='Command to run on TPU', default='echo "Hello, TPU!" > /tmp/hello.txt')
 @click.option('--port', prompt='Port', default=5000)
 @click.option('--host', prompt='Host', default='0.0.0.0')
-def run(region, project, tpu_device, node_count, batch, command, port, host):
+@click.option('--requires-exact-batch-size', prompt='Requires exact batch size', default=False)
+@click.option('--allow-dummy-batch-size', prompt='Allow dummy batch size', default=True)
+def run(region, project, tpu_device, node_count, batch, command, port, host, requires_exact_batch_size, allow_dummy_batch_size):
     click.echo(f"Creating TPU swarm in {region} region, project {project}, with {node_count} {tpu_device} devices.")
-    options.update({'batch_size': batch, 'project': project, 'region': region, 'tpu_device': tpu_device, 'node_count': node_count, 'command': command})
+    options.update({'batch_size': batch, 'project': project, 'region': region, 'tpu_device': tpu_device, 'node_count': node_count, 'command': command, 'requires_exact_batch_size': requires_exact_batch_size, 'allow_dummy_batch_size': allow_dummy_batch_size})
 
     loop = asyncio.get_event_loop()
     loop.run_in_executor(None, run_flask_app, host, port)

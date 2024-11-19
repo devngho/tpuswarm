@@ -13,24 +13,34 @@ app = Flask(__name__)
 client = TpuAsyncClient()
 sslcontext = ssl.create_default_context(purpose=ssl.Purpose.CLIENT_AUTH)
 
-available_ips = []
+available_ips = set()
+available_ips_mutex = asyncio.Lock()
 ips = []
 setup_ips = []
+processing_ips = []
+processing_ips_mutex = asyncio.Lock()
 options = {
     'batch_size': 512,
 }
-aiohttp_errors = (aiohttp.client_exceptions.ClientResponseError, aiohttp.client_exceptions.ClientConnectorDNSError, aiohttp.client_exceptions.ClientConnectorError)
+aiohttp_errors = (aiohttp.client_exceptions.ClientResponseError, aiohttp.client_exceptions.ClientConnectorError, aiohttp.ClientResponseError, aiohttp.client_exceptions.ContentTypeError)
 
 async def send_request_to_ip(session, ip, data):
     try:
+        async with available_ips_mutex:
+            processing_ips.append(ip)
         async with session.post(f"https://{ip}:8080/batch", json=data, timeout=10000) as response:
             return await response.json()
     except Exception as e:
         return e
+    finally:
+        async with available_ips_mutex:
+            processing_ips.remove(ip)
 
 async def check_node_available(session, ip):
+    print(f"Checking node {ip}")
     try:
-        async with session.get(f"https://{ip}:8080/heartbeat", timeout=10000) as response:
+        async with session.get(f"https://{ip}:8080/heartbeat", timeout=5) as response:
+            print(f"Node {ip} is {'available' if response.status == 200 else 'not available'}")
             return response.status == 200
     except Exception as e:
         print(f"Failed to check node {ip}: {e}")
@@ -48,6 +58,18 @@ async def batch():
     batch_size = options['batch_size']
     batches = [body['prompts'][i:i + batch_size] for i in range(0, len(body['prompts']), batch_size)]
 
+    remaining = len(body['prompts']) % batch_size
+    if remaining != 0:
+        if options.get('requires_exact_batch_size', False):
+            if not options.get('allow_dummy_batch_size', True):
+                return {'error': 'Requires exact batch size'}
+            # append dummy prompts
+            last_batch = body['prompts'][-remaining:] + ['' for _ in range(batch_size - remaining)]
+            batches.append(last_batch)
+        else:
+            # append only the remaining prompts without padding
+            batches.append(body['prompts'][-remaining:])
+
     # distribute to available nodes. Bind >1 batches to a node is allowed
     async with aiohttp.ClientSession(trust_env=True, connector=aiohttp.TCPConnector(limit_per_host=5, verify_ssl=False)) as session:
         tasks = [send_request_to_ip(session, ip[1], {
@@ -58,26 +80,34 @@ async def batch():
 
         # error -> try other nodes
         retry_targets = [i for i, result in enumerate(results) if isinstance(result, Exception) or any(map(lambda x: x in result, aiohttp_errors))]
-        if len(retry_targets) == 0: # all success
-            # flatten the results
-            return {'results': list(chain([result for r in results for result in r['result']]))}
+        if len(retry_targets) != 0:
+            # retry
+            while len(retry_targets) > 0:
+                print(f"Retrying {len(retry_targets)}({', '.join(map(str, retry_targets))}) batches")
 
-        # retry
-        for i in retry_targets:
-            for ip in available_ips:
-                print(f"Retrying batch {i} on {ip}")
-                try:
-                    results[i] = await send_request_to_ip(session, ip[1], {
+                async def retry_task(i, ip):
+                    return (i, await send_request_to_ip(session, ip, {
                         'prompts': batches[i],
-                        'samplings': body['samplings']
-                    })
-                    break
-                except Exception as e:
-                    pass
-                except aiohttp_errors as e:
-                    pass
+                        'sampling': body['samplings']
+                    }))
 
-    return {'results': list(chain([result for r in results for result in r['result']]))}
+                retry_tasks = [retry_task(i, ip[1]) for i, ip in zip(retry_targets, cycle(available_ips))]
+                retry_results = await asyncio.gather(*retry_tasks, return_exceptions=True)
+                for i, result in retry_results:
+                    if not isinstance(result, Exception) and not any(map(lambda x: x in result, aiohttp_errors)):
+                        results[i] = result
+                        retry_targets.remove(i)
+
+    # Remove dummy results if required
+    if remaining != 0 and options.get('requires_exact_batch_size', False):
+        # Update the last batch to exclude dummy results
+        results[-1]['result'] = results[-1]['result'][:remaining]
+
+    # Flatten results into a single list
+    flattened_results = list(chain.from_iterable(r['result'] for r in results))
+
+    return {'results': flattened_results}
+
 
 
 async def list_tpus(project, region):
@@ -118,7 +148,7 @@ async def remove_tpu(resource):
 async def manage_tpus(project, region, tpu_device, node_count, command):
     print("Starting TPU management loop")
 
-    # work for each 60s
+    # work for each 30s
     global setup_ips
 
     async with aiohttp.ClientSession(trust_env=True, connector=aiohttp.TCPConnector(limit_per_host=5, verify_ssl=False)) as session:
@@ -156,14 +186,20 @@ async def manage_tpus(project, region, tpu_device, node_count, command):
                     print(f"Failed to setup TPU node: {e}. Continuing.")
 
             # heartbeat check for each node, then add to available_ips
-            tasks = [check_node_available(session, ip) for name, ip in setup_ips]
-            results = await asyncio.gather(*tasks)
-            res = [ip for ip, result in zip(setup_ips, results) if result]
+            async with available_ips_mutex and processing_ips_mutex:
+                check_target = [(name, ip) for name, ip in setup_ips if ip not in processing_ips]
+                tasks = [check_node_available(session, ip) for name, ip in check_target]
+                results = await asyncio.gather(*tasks)
+                res = [ip for ip, result in zip(check_target, results) if result]
 
-            available_ips.clear()
-            available_ips.extend(res)
+                processing_ip_names = set([(name, ip) for name, ip in setup_ips if ip in processing_ips])
 
-            print(f"Available TPU nodes: {len(available_ips)}")
+                available_ips.clear()
+                available_ips.update(res)
+                available_ips.update(processing_ip_names)
+
+                print(f"Available TPU nodes: {len(available_ips)}({', '.join(map(str, available_ips-processing_ip_names))} + {len(processing_ips)}({', '.join(map(str, processing_ip_names))}) processing)/{len(setup_ips)}")
+                print(f"Not available TPU nodes: {len(setup_ips) - len(available_ips)}({', '.join(map(str, set(setup_ips) - available_ips))})")
 
             if len(active_nodes) + len(waiting_nodes) + len(provisioning_nodes) + len(suspending_nodes) + len(suspended_nodes) < node_count: # suspend nodes are included in quota!
                 node_id_num = random.randint(1, 100000)
